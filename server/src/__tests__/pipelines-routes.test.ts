@@ -171,6 +171,25 @@ describeEmbeddedPostgres("pipeline routes", () => {
     isInstanceAdmin: true,
   };
 
+  it("returns 404 (not 500) when a pipeline/case identifier is not a UUID", async () => {
+    // Regression: the intake-to-case flow addressed the pipeline by its display
+    // name ("外包接案") in the :pipelineId slot. The uuid-typed lookup
+    // `select company_id from pipelines where id = $1` then raised a raw
+    // Postgres "invalid input syntax for type uuid" error that no HttpError
+    // wrapped, surfacing as a 500. A malformed identifier must be treated as
+    // "not found" (404), never a server crash.
+    await seedCompany();
+    const http = request(app(boardActor));
+
+    await http.get(`/api/pipelines/${encodeURIComponent("外包接案")}/cases`).expect(404);
+    await http
+      .post(`/api/pipelines/not-a-uuid/cases`)
+      .send({ caseKey: "case-1", title: "Case 1" })
+      .expect(404);
+    // Pipeline case routes share the same resolver choke point.
+    await http.get(`/api/cases/not-a-uuid-case`).expect(404);
+  });
+
   it("exposes the pipeline and case route surface", async () => {
     const company = await seedCompany();
     const http = request(app(boardActor));

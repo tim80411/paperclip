@@ -60,6 +60,7 @@ import {
   computePipelineHealth,
   deriveCaseType,
   envConfigSchema,
+  isUuidLike,
   issueDocumentKeySchema,
   PIPELINE_CASE_BODY_DOCUMENT_KEY,
   pipelineAutomationRetryRequestSchema,
@@ -438,6 +439,11 @@ function parseCaseEventsQuery(query: Request["query"]) {
 }
 
 async function resolvePipelineCompanyId(db: Db, pipelineId: string) {
+  // pipelines.id is a uuid column: a non-UUID path param (e.g. a display name
+  // passed instead of the id) would make Postgres raise "invalid input syntax
+  // for type uuid", an unwrapped error that surfaces as a 500. A malformed id
+  // simply matches nothing — treat it as not found.
+  if (!isUuidLike(pipelineId)) throw notFound("Pipeline not found");
   const row = await db
     .select({ companyId: pipelines.companyId })
     .from(pipelines)
@@ -449,6 +455,9 @@ async function resolvePipelineCompanyId(db: Db, pipelineId: string) {
 }
 
 async function resolveCaseCompanyId(db: Db, caseId: string) {
+  // pipeline_cases.id is a uuid column — same uuid-cast crash guard as
+  // resolvePipelineCompanyId above.
+  if (!isUuidLike(caseId)) throw notFound("Pipeline case not found");
   const row = await db
     .select({ companyId: pipelineCases.companyId })
     .from(pipelineCases)
