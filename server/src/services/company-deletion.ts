@@ -28,6 +28,11 @@ import {
   financeEvents,
   budgetPolicies,
   budgetIncidents,
+  feedbackVotes,
+  inboxDismissals,
+  issueInboxArchives,
+  issueThreadInteractions,
+  workspaceRuntimeServices,
   issueReadStates,
   approvalComments,
   approvals,
@@ -69,6 +74,17 @@ export async function deleteCompany(db: Db, id: string) {
         await tx.delete(costEvents).where(eq(costEvents.companyId, id));
         await tx.delete(budgetIncidents).where(eq(budgetIncidents.companyId, id));
         await tx.delete(budgetPolicies).where(eq(budgetPolicies.companyId, id));
+        // fork patch fix(companies) (2026-07-28; re-ported 2026-10-24 after upstream #15631 moved
+        // remove() here): these five company-scoped tables have a NO ACTION (restrict) FK to
+        // companies and nothing else in this transaction deletes them, so a company holding rows
+        // in any of them failed at the final delete(companies) with a bare 500. Every other FK
+        // they hold points at tables deleted later in this transaction, so deleting them first
+        // is safe (upstream already handles budget_incidents/budget_policies above).
+        await tx.delete(issueThreadInteractions).where(eq(issueThreadInteractions.companyId, id));
+        await tx.delete(issueInboxArchives).where(eq(issueInboxArchives.companyId, id));
+        await tx.delete(inboxDismissals).where(eq(inboxDismissals.companyId, id));
+        await tx.delete(feedbackVotes).where(eq(feedbackVotes.companyId, id));
+        await tx.delete(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.companyId, id));
         // Cases retain task and agent references. Their dependent handoffs and
         // access sources cascade here before those task/agent records are removed.
         await tx.delete(cases).where(eq(cases.companyId, id));
@@ -109,10 +125,13 @@ export async function deleteCompany(db: Db, id: string) {
         await tx.delete(issues).where(eq(issues.companyId, id));
         await tx.delete(companyLogos).where(eq(companyLogos.companyId, id));
         await tx.delete(assets).where(eq(assets.companyId, id));
-        await tx.delete(goals).where(eq(goals.companyId, id));
         await requestRestorePointDeletion(tx, { companyId: id });
         await tx.delete(executionWorkspaces).where(eq(executionWorkspaces.companyId, id));
+        // fork patch fix(companies): projects before goals — projects.goal_id is a NO ACTION
+        // (restrict) FK to goals.id, so deleting goals first fails with
+        // projects_goal_id_goals_id_fk for any company whose projects are attached to a goal.
         await tx.delete(projects).where(eq(projects.companyId, id));
+        await tx.delete(goals).where(eq(goals.companyId, id));
         await agentLifecycleCompanyDeletion.deleteCompanyData(tx, id);
         const rows = await tx
           .delete(companies)
