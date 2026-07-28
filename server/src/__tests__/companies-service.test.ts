@@ -6,8 +6,18 @@ import {
   agentConfigRevisions,
   agents,
   agentWakeupRequests,
+  budgetIncidents,
+  budgetPolicies,
   builtInManagedResources,
   companies,
+  feedbackVotes,
+  goals,
+  inboxDismissals,
+  issueInboxArchives,
+  issueThreadInteractions,
+  issues,
+  projects,
+  workspaceRuntimeServices,
   companySkillVersions,
   companySkills,
   companyMemberships,
@@ -58,11 +68,102 @@ describeEmbeddedPostgres("companyService", () => {
     await db.delete(agents);
     await db.delete(principalPermissionGrants);
     await db.delete(companyMemberships);
+    // Tables touched by the remove() regression case below. A passing run leaves
+    // none of these behind, but if that test ever fails mid-way the leftover rows
+    // would block `delete(companies)` here and cascade into every later test.
+    await db.delete(budgetIncidents);
+    await db.delete(budgetPolicies);
+    await db.delete(issueThreadInteractions);
+    await db.delete(issueInboxArchives);
+    await db.delete(inboxDismissals);
+    await db.delete(feedbackVotes);
+    await db.delete(workspaceRuntimeServices);
+    await db.delete(issues);
+    await db.delete(projects);
+    await db.delete(goals);
     await db.delete(companies);
   });
 
   afterAll(async () => {
     await tempDb?.cleanup();
+  });
+
+  it("remove() deletes a company that holds rows in every restrict-FK child table", async () => {
+    // Regression: `remove()` used to leave seven company-scoped tables untouched
+    // and deleted goals before projects. Both produced a foreign key violation on
+    // the final `delete(companies)`, rolling the transaction back and surfacing as
+    // a bare `500 Internal server error`. In practice every real company hit this:
+    // any company with a budget (budget_policies) or with agent interaction cards
+    // (issue_thread_interactions) could not be deleted at all.
+    //
+    // This case is deliberately built to trip every one of those FKs at once.
+    // Note the suite's own afterEach calls `db.delete(companies)` directly, which
+    // bypasses remove() entirely — that is exactly why this bug survived CI, so
+    // this test must go through the service.
+    const svc = companyService(db);
+    const created = await svc.create({ name: "Doomed Co" });
+    const companyId = created.id;
+
+    const [goal] = await db
+      .insert(goals)
+      .values({ companyId, title: "A goal that a project points at" })
+      .returning();
+    // projects.goal_id -> goals.id is NO ACTION: deleting goals first fails here.
+    await db.insert(projects).values({ companyId, name: "Attached project", goalId: goal.id });
+
+    const [issue] = await db
+      .insert(issues)
+      .values({ companyId, title: "An issue with interactions" })
+      .returning();
+
+    const [policy] = await db
+      .insert(budgetPolicies)
+      .values({ companyId, scopeType: "company", scopeId: companyId, windowKind: "monthly" })
+      .returning();
+    await db.insert(budgetIncidents).values({
+      companyId,
+      policyId: policy.id,
+      scopeType: "company",
+      scopeId: companyId,
+      metric: "billed_cents",
+      windowKind: "monthly",
+      windowStart: new Date("2026-07-01T00:00:00Z"),
+      windowEnd: new Date("2026-08-01T00:00:00Z"),
+      thresholdType: "hard",
+      amountLimit: 100,
+      amountObserved: 101,
+    });
+    await db.insert(issueThreadInteractions).values({
+      companyId,
+      issueId: issue.id,
+      kind: "request_confirmation",
+      payload: {},
+    });
+    await db.insert(issueInboxArchives).values({ companyId, issueId: issue.id, userId: "user-1" });
+    await db.insert(inboxDismissals).values({ companyId, userId: "user-1", itemKey: "k" });
+    await db.insert(feedbackVotes).values({
+      companyId,
+      issueId: issue.id,
+      targetType: "issue",
+      targetId: issue.id,
+      authorUserId: "user-1",
+      vote: "up",
+    });
+    await db.insert(workspaceRuntimeServices).values({
+      // this table's id has no defaultRandom()
+      id: randomUUID(),
+      companyId,
+      scopeType: "company",
+      serviceName: "svc",
+      status: "stopped",
+      lifecycle: "manual",
+      provider: "local",
+    });
+
+    await expect(svc.remove(companyId)).resolves.toBeTruthy();
+
+    const remaining = await db.select().from(companies).where(eq(companies.id, companyId));
+    expect(remaining).toHaveLength(0);
   });
 
   it("retries generated issue prefixes when Drizzle wraps the unique constraint error", async () => {

@@ -4,6 +4,13 @@ import {
   companies,
   companyLogos,
   assets,
+  budgetIncidents,
+  budgetPolicies,
+  feedbackVotes,
+  inboxDismissals,
+  issueInboxArchives,
+  issueThreadInteractions,
+  workspaceRuntimeServices,
   agents,
   agentApiKeys,
   agentRuntimeState,
@@ -433,6 +440,27 @@ export function companyService(db: Db) {
     remove: (id: string) =>
       db.transaction(async (tx) => {
         // Delete from child tables in dependency order
+        //
+        // These seven company-scoped tables have a NO ACTION (restrict) FK to
+        // companies and were never deleted here, so any company holding rows in
+        // them could not be deleted at all: the final `delete(companies)` failed
+        // with a foreign key violation and the whole transaction rolled back,
+        // surfacing as a bare `500 Internal server error`.
+        //
+        // They are deleted first because every other FK they hold points at
+        // tables removed later in this transaction (issues, agents,
+        // heartbeat_runs, projects, approvals, issue_comments, …); no table
+        // already deleted below restrict-references any of them. The only
+        // ordering constraint among the seven is budget_incidents ->
+        // budget_policies, honoured here.
+        await tx.delete(issueThreadInteractions).where(eq(issueThreadInteractions.companyId, id));
+        await tx.delete(issueInboxArchives).where(eq(issueInboxArchives.companyId, id));
+        await tx.delete(inboxDismissals).where(eq(inboxDismissals.companyId, id));
+        await tx.delete(feedbackVotes).where(eq(feedbackVotes.companyId, id));
+        await tx.delete(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.companyId, id));
+        await tx.delete(budgetIncidents).where(eq(budgetIncidents.companyId, id));
+        await tx.delete(budgetPolicies).where(eq(budgetPolicies.companyId, id));
+
         const companyRunIds = await tx
           .select({ id: heartbeatRuns.id })
           .from(heartbeatRuns)
@@ -470,8 +498,13 @@ export function companyService(db: Db) {
         await tx.delete(issues).where(eq(issues.companyId, id));
         await tx.delete(companyLogos).where(eq(companyLogos.companyId, id));
         await tx.delete(assets).where(eq(assets.companyId, id));
-        await tx.delete(goals).where(eq(goals.companyId, id));
+        // projects before goals: projects.goal_id has a NO ACTION (restrict) FK
+        // to goals.id, so deleting goals first fails with
+        // "update or delete on table \"goals\" violates foreign key constraint
+        //  \"projects_goal_id_goals_id_fk\" on table \"projects\"" for any
+        // company whose projects are attached to a goal.
         await tx.delete(projects).where(eq(projects.companyId, id));
+        await tx.delete(goals).where(eq(goals.companyId, id));
         await tx.delete(agents).where(eq(agents.companyId, id));
         const rows = await tx
           .delete(companies)
