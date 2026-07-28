@@ -53,8 +53,14 @@ import type {
 import type { AgentToolDescriptor, PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import { logActivity, type LogActivityInput } from "./activity-log.js";
 import { secretService } from "./secrets.js";
-import { mcpHttpRequestHeaders, parseMcpHttpResponseBody } from "./mcp-http.js";
+import {
+  isMcpMissingSessionResponse,
+  mcpHttpOpenSession,
+  mcpHttpRequestHeaders,
+  parseMcpHttpResponseBody,
+} from "./mcp-http.js";
 import { assertPublicRemoteHttpEndpoint, parseRemoteHttpEndpoint } from "./remote-http-endpoint-guard.js";
+import { serverVersion } from "../version.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import {
@@ -3035,12 +3041,12 @@ export function createToolGatewayService(
     const timer = setTimeout(() => controller.abort(), ms);
     timer.unref?.();
     try {
-      const response = await fetch(endpoint, {
+      const callRemoteTool = (sessionHeaders?: Record<string, string>) => fetch(endpoint, {
         method: "POST",
         redirect: "manual",
         // MCP Streamable HTTP requires the Accept header advertising both a JSON
         // body and an SSE stream; spec-compliant servers 406 without it.
-        headers: mcpHttpRequestHeaders(headers),
+        headers: mcpHttpRequestHeaders({ ...headers, ...(sessionHeaders ?? {}) }),
         signal: controller.signal,
         body: JSON.stringify({
           jsonrpc: "2.0",
@@ -3052,7 +3058,23 @@ export function createToolGatewayService(
           },
         }),
       });
-      const body = await readBoundedRemoteResponse(response);
+      let response = await callRemoteTool();
+      let body = await readBoundedRemoteResponse(response);
+      // Stateful servers refuse any method outside an initialized session; open
+      // one and retry exactly once. Every other status is left to the error
+      // handling below, unchanged.
+      if (isMcpMissingSessionResponse(response.status, body)) {
+        const mcpSession = await mcpHttpOpenSession({
+          endpoint,
+          headers,
+          signal: controller.signal,
+          clientVersion: serverVersion,
+        });
+        if (mcpSession && !mcpSession.stateless) {
+          response = await callRemoteTool(mcpSession.headers);
+          body = await readBoundedRemoteResponse(response);
+        }
+      }
       execution.response = {
         httpStatus: response.status,
         contentType: response.headers.get("content-type"),

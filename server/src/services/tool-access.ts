@@ -109,8 +109,14 @@ import type {
 } from "@paperclipai/shared";
 import { CLASS3_STATIC_LEASE_ALLOWLIST, credentialConfigPath, getAvailableConnectionMethod, getConnectableAppDefinition, isToolConnectionAttentionHealth, recommendedDefaultsForApp } from "@paperclipai/shared";
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
+import { serverVersion } from "../version.js";
 import { logActivity } from "./activity-log.js";
-import { mcpHttpRequestHeaders, parseMcpHttpResponseBody } from "./mcp-http.js";
+import {
+  isMcpMissingSessionResponse,
+  mcpHttpOpenSession,
+  mcpHttpRequestHeaders,
+  parseMcpHttpResponseBody,
+} from "./mcp-http.js";
 import { assertPublicRemoteHttpEndpoint, parseRemoteHttpEndpoint } from "./remote-http-endpoint-guard.js";
 import { secretService } from "./secrets.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
@@ -2774,11 +2780,11 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
   async function remoteTools(connection: typeof toolConnections.$inferSelect): Promise<McpToolDescriptor[]> {
     const headers = await resolveCredentialHeaders(connection);
     const endpoint = await assertRemoteEndpointAllowed(connection.config);
-    const response = await fetch(endpoint, {
+    const listRemoteTools = (sessionHeaders?: Record<string, string>) => fetch(endpoint, {
       method: "POST",
       // MCP Streamable HTTP requires advertising that we accept both a JSON body
       // and an SSE stream; spec-compliant servers 406 without it (see mcp-http.ts).
-      headers: mcpHttpRequestHeaders(headers),
+      headers: mcpHttpRequestHeaders({ ...headers, ...(sessionHeaders ?? {}) }),
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: "paperclip-catalog-refresh",
@@ -2786,6 +2792,20 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         params: {},
       }),
     });
+    let response = await listRemoteTools();
+    // Stateful servers reject a cold `tools/list` outright; open a session and
+    // retry exactly once. Every other status falls through untouched — notably
+    // the 401 + WWW-Authenticate branch below, which must observe the upstream
+    // challenge itself to drive OAuth discovery.
+    if (response.status === 400) {
+      const sessionProbeBody = await response.text().catch(() => "");
+      if (isMcpMissingSessionResponse(response.status, sessionProbeBody)) {
+        const mcpSession = await mcpHttpOpenSession({ endpoint, headers, clientVersion: serverVersion });
+        if (mcpSession && !mcpSession.stateless) {
+          response = await listRemoteTools(mcpSession.headers);
+        }
+      }
+    }
     if (!response.ok) {
       const authenticate = response.headers.get("www-authenticate") ?? "";
       if (response.status === 401 && /bearer|oauth|authorization/i.test(authenticate)) {

@@ -27,6 +27,98 @@ export function mcpHttpRequestHeaders(extra?: Record<string, string>): Record<st
   };
 }
 
+/** Response header carrying the Streamable HTTP session id. */
+export const MCP_HTTP_SESSION_HEADER = "mcp-session-id";
+
+/**
+ * Protocol version advertised on `initialize` over Streamable HTTP.
+ *
+ * Streamable HTTP — and the `mcp-session-id` header this module depends on —
+ * postdates the `2024-11-05` revision, so this deliberately advertises a newer
+ * one. Nothing here requires the server to agree: a server that speaks an older
+ * revision answers `initialize` with whatever it does support, and the only
+ * value read back off that response is the session id.
+ */
+export const MCP_HTTP_PROTOCOL_VERSION = "2025-06-18";
+
+/**
+ * Does this response mean the server requires an initialized MCP session?
+ *
+ * Servers built on the reference Streamable HTTP transport are stateful: every
+ * method that arrives without a session id — `tools/list` and `tools/call`
+ * included — is rejected with
+ * `400 {"jsonrpc":"2.0","error":{"code":-32000,"message":"Bad Request: No valid session ID provided"}}`.
+ * Stateless servers never answer this way, so callers can treat a true result
+ * as "retry inside a session" and leave every other status alone.
+ */
+export function isMcpMissingSessionResponse(status: number, bodyText: string): boolean {
+  if (status !== 400 || !bodyText) return false;
+  // The wording is an implementation detail rather than part of the spec, so
+  // accept the JSON-RPC error code plus any mention of a session as a fallback.
+  // A false positive costs one extra `initialize` round trip and nothing more,
+  // so this errs towards recognising the condition.
+  return /no valid session id/i.test(bodyText) || (/-32000/.test(bodyText) && /session/i.test(bodyText));
+}
+
+export type McpHttpSession = {
+  /** Headers to merge into every subsequent JSON-RPC POST on this session. */
+  headers: Record<string, string>;
+  /** True when the server issued no session id, i.e. it is stateless. */
+  stateless: boolean;
+};
+
+/**
+ * Open an MCP session by performing the `initialize` handshake plus the
+ * `notifications/initialized` follow-up that stateful servers gate other
+ * methods behind.
+ *
+ * Best-effort by design: any failure returns `null` so the caller keeps the
+ * response it already has and its existing error handling stays authoritative.
+ */
+export async function mcpHttpOpenSession(input: {
+  endpoint: string;
+  /** Reported in `clientInfo`; callers pass the running server's version. */
+  clientVersion: string;
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+}): Promise<McpHttpSession | null> {
+  const { endpoint, clientVersion, headers = {}, signal } = input;
+  const response = await fetch(endpoint, {
+    method: "POST",
+    redirect: "manual",
+    headers: mcpHttpRequestHeaders(headers),
+    signal,
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: "paperclip-mcp-initialize",
+      method: "initialize",
+      params: {
+        protocolVersion: MCP_HTTP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: "paperclip", version: clientVersion },
+      },
+    }),
+  }).catch(() => null);
+  if (!response || !response.ok) return null;
+  // Drain the initialize result so the socket is released. The session is
+  // registered server-side by the time the headers arrive, so a read failure
+  // here (e.g. an SSE stream the server holds open) must not void it.
+  await response.text().catch(() => "");
+  const sessionId = response.headers.get(MCP_HTTP_SESSION_HEADER);
+  if (!sessionId) return { headers: {}, stateless: true };
+  const sessionHeaders = { [MCP_HTTP_SESSION_HEADER]: sessionId };
+  await fetch(endpoint, {
+    method: "POST",
+    redirect: "manual",
+    headers: mcpHttpRequestHeaders({ ...headers, ...sessionHeaders }),
+    signal,
+    body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }),
+  })
+    .then((res) => res.text().catch(() => ""))
+    .catch(() => undefined);
+  return { headers: sessionHeaders, stateless: false };
+}
+
 function looksLikeJsonRpcMessage(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
