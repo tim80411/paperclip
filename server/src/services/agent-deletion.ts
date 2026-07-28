@@ -1,7 +1,7 @@
 import { and, eq, or, sql } from "drizzle-orm";
 import { agents, agentApiKeys, agentRuntimeState, agentTaskSessions, agentWakeupRequests, activityLog,
   budgetReservations, heartbeatRunEvents, heartbeatRuns, issueExecutionDecisions, issues, issueComments,
-  caseHandoffs, principalPermissionGrants, type Db } from "@paperclipai/db";
+  caseHandoffs, principalPermissionGrants, routines, type Db } from "@paperclipai/db";
 import { conflict } from "../errors.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 
@@ -32,6 +32,11 @@ export async function deleteAgentDependencies(tx: Db, companyId: string, id: str
     .update(issues)
     .set({ assigneeAgentId: null, createdByAgentId: null })
     .where(or(eq(issues.assigneeAgentId, id), eq(issues.createdByAgentId, id)));
+  // fork patch fix(agents) (2026-07-28; re-ported 2026-10-24 after upstream #15631 moved remove()
+  // here): routines.assignee_agent_id is the one agent FK on routines without an onDelete clause
+  // (NO ACTION), so it blocks the agents delete with routines_assignee_agent_id_agents_id_fk for
+  // any agent that owns a routine. Detach it the same way issues.assignee_agent_id is detached above.
+  await tx.update(routines).set({ assigneeAgentId: null }).where(eq(routines.assigneeAgentId, id));
   await tx.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.agentId, id));
   await tx.delete(agentTaskSessions).where(eq(agentTaskSessions.agentId, id));
   await tx.delete(activityLog).where(
