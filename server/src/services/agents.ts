@@ -15,6 +15,7 @@ import {
   issueExecutionDecisions,
   issues,
   issueComments,
+  routines,
 } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
@@ -754,6 +755,16 @@ export function agentService(db: Db) {
           .update(issues)
           .set({ assigneeAgentId: null, createdByAgentId: null })
           .where(or(eq(issues.assigneeAgentId, id), eq(issues.createdByAgentId, id)));
+        // routines.assignee_agent_id is the one agent FK on routines without an
+        // onDelete clause (created_by/updated_by are already "set null"), so it
+        // is NO ACTION and blocks the delete below with
+        // "routines_assignee_agent_id_agents_id_fk" for any agent that owns a
+        // routine. Detach it the same way issues.assignee_agent_id is detached
+        // — an assignee going away should orphan the routine, not the request.
+        await tx
+          .update(routines)
+          .set({ assigneeAgentId: null })
+          .where(eq(routines.assigneeAgentId, id));
         await tx.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.agentId, id));
         await tx.delete(agentTaskSessions).where(eq(agentTaskSessions.agentId, id));
         await tx.delete(activityLog).where(
