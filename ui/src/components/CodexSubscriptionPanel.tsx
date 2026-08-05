@@ -9,22 +9,28 @@ interface CodexSubscriptionPanelProps {
 
 const WINDOW_PRIORITY = [
   "5hlimit",
+  "24hlimit",
   "weeklylimit",
-  "credits",
 ] as const;
+
+// Credits is not a time window and always sorts last.
+const CREDITS_RANK = WINDOW_PRIORITY.length + 1;
 
 function normalizeLabel(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
+function windowRank(label: string): number {
+  const base = normalizeLabel(label).replace(/^gpt53codexspark/, "");
+  if (base === "credits") return CREDITS_RANK;
+  const index = WINDOW_PRIORITY.indexOf(base as (typeof WINDOW_PRIORITY)[number]);
+  // Window labels are derived from the duration the provider reports, so an
+  // unfamiliar one (e.g. "30d limit") is still a window and belongs above Credits.
+  return index === -1 ? CREDITS_RANK - 1 : index;
+}
+
 function orderedWindows(windows: QuotaWindow[]): QuotaWindow[] {
-  return [...windows].sort((a, b) => {
-    const aBase = normalizeLabel(a.label).replace(/^gpt53codexspark/, "");
-    const bBase = normalizeLabel(b.label).replace(/^gpt53codexspark/, "");
-    const aIndex = WINDOW_PRIORITY.indexOf(aBase as (typeof WINDOW_PRIORITY)[number]);
-    const bIndex = WINDOW_PRIORITY.indexOf(bBase as (typeof WINDOW_PRIORITY)[number]);
-    return (aIndex === -1 ? WINDOW_PRIORITY.length : aIndex) - (bIndex === -1 ? WINDOW_PRIORITY.length : bIndex);
-  });
+  return [...windows].sort((a, b) => windowRank(a.label) - windowRank(b.label));
 }
 
 function detailText(window: QuotaWindow): string | null {
@@ -91,8 +97,8 @@ export function CodexSubscriptionPanel({
             Account windows
           </div>
           <div className="space-y-3">
-            {accountWindows.map((window) => (
-              <QuotaWindowRow key={window.label} window={window} />
+            {accountWindows.map((window, index) => (
+              <QuotaWindowRow key={`${window.label}-${index}`} window={window} />
             ))}
           </div>
         </div>
@@ -103,8 +109,8 @@ export function CodexSubscriptionPanel({
               Model windows
             </div>
             <div className="space-y-3">
-              {modelWindows.map((window) => (
-                <QuotaWindowRow key={window.label} window={window} />
+              {modelWindows.map((window, index) => (
+                <QuotaWindowRow key={`${window.label}-${index}`} window={window} />
               ))}
             </div>
           </div>

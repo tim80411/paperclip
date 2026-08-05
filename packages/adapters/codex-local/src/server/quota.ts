@@ -218,6 +218,23 @@ export function secondsToWindowLabel(
   return `${Math.round(hours / 24)}d`;
 }
 
+/**
+ * Name a quota window from its own reported duration rather than from the slot
+ * it arrived in. Which windows exist is a plan detail that OpenAI changes:
+ * Plus currently returns a single 7d window in `primary`, while Pro returns a
+ * 5h `primary` plus a 7d `secondary`. Labelling by slot makes the panel announce
+ * a weekly window as "5h limit". Falls back to the slot name when the provider
+ * omits the duration.
+ */
+export function windowLabelFromDuration(
+  seconds: number | null | undefined,
+  fallback: string,
+): string {
+  if (seconds == null) return fallback;
+  const token = secondsToWindowLabel(seconds, fallback);
+  return token === "7d" ? "Weekly limit" : `${token} limit`;
+}
+
 /** fetch with an abort-based timeout so a hanging provider api doesn't block the response indefinitely */
 export async function fetchWithTimeout(
   url: string,
@@ -302,7 +319,7 @@ export async function fetchCodexQuota(
   if (rateLimit?.primary_window != null) {
     const w = rateLimit.primary_window;
     windows.push({
-      label: "5h limit",
+      label: windowLabelFromDuration(w.limit_window_seconds, "5h limit"),
       usedPercent: normalizeCodexUsedPercent(w.used_percent),
       resetsAt:
         typeof w.reset_at === "number"
@@ -315,7 +332,7 @@ export async function fetchCodexQuota(
   if (rateLimit?.secondary_window != null) {
     const w = rateLimit.secondary_window;
     windows.push({
-      label: "Weekly limit",
+      label: windowLabelFromDuration(w.limit_window_seconds, "Weekly limit"),
       usedPercent: normalizeCodexUsedPercent(w.used_percent),
       resetsAt:
         typeof w.reset_at === "number"
@@ -385,10 +402,18 @@ function unixSecondsToIso(value: number | null | undefined): string | null {
   return new Date(value * 1000).toISOString();
 }
 
-function buildCodexRpcWindow(label: string, window: CodexRpcWindow | null | undefined): QuotaWindow | null {
+function buildCodexRpcWindow(
+  prefix: string,
+  fallbackLabel: string,
+  window: CodexRpcWindow | null | undefined,
+): QuotaWindow | null {
   if (!window) return null;
+  const durationSeconds =
+    typeof window.windowDurationMins === "number" && Number.isFinite(window.windowDurationMins)
+      ? window.windowDurationMins * 60
+      : null;
   return {
-    label,
+    label: `${prefix}${windowLabelFromDuration(durationSeconds, fallbackLabel)}`,
     usedPercent: normalizeCodexUsedPercent(window.usedPercent),
     resetsAt: unixSecondsToIso(window.resetsAt),
     valueLabel: null,
@@ -433,9 +458,9 @@ export function mapCodexRpcQuota(result: CodexRpcRateLimitsResult, account?: Cod
       limitId === "codex"
         ? ""
         : `${limit.limitName ?? limitId} · `;
-    const primary = buildCodexRpcWindow(`${prefix}5h limit`, limit.primary);
+    const primary = buildCodexRpcWindow(prefix, "5h limit", limit.primary);
     if (primary) windows.push(primary);
-    const secondary = buildCodexRpcWindow(`${prefix}Weekly limit`, limit.secondary);
+    const secondary = buildCodexRpcWindow(prefix, "Weekly limit", limit.secondary);
     if (secondary) windows.push(secondary);
     if (limitId === "codex" && limit.credits && limit.credits.unlimited !== true) {
       windows.push({
