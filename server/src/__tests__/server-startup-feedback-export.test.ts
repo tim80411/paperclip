@@ -604,6 +604,7 @@ describe("startServer PAPERCLIP_API_URL handling", () => {
     loadConfigMock.mockReturnValue(buildTestConfig());
     process.env.BETTER_AUTH_SECRET = "test-secret";
     delete process.env.PAPERCLIP_API_URL;
+    delete process.env.PAPERCLIP_RUNTIME_API_URL;
   });
 
   afterEach(() => {
@@ -689,5 +690,29 @@ describe("startServer PAPERCLIP_API_URL handling", () => {
     expect(started.listenPort).toBe(3110);
     expect(started.apiUrl).toBe("https://paperclip.example");
     expect(process.env.PAPERCLIP_RUNTIME_API_URL).toBe("https://paperclip.example");
+  });
+
+  it("honors a preset PAPERCLIP_RUNTIME_API_URL instead of recomputing from allowedHostnames", async () => {
+    // Operator-supplied PAPERCLIP_RUNTIME_API_URL must win over the computed default
+    // so launcher scripts can pin spawned agents to a reachable URL even when
+    // allowedHostnames[0] resolves to a hostname not bound to the listen port.
+    //
+    // ⚠️ The preset port MUST differ from the configured listen port, and the host
+    // MUST differ from allowedHostnames[0]. Upstream #5102 made
+    // choosePrimaryRuntimeApiUrl return the loopback origin when bindHost is a
+    // non-wildcard loopback -- which buildTestConfig's host ("127.0.0.1") is. With
+    // the old preset of "http://127.0.0.1:3100" the computed default was byte-identical
+    // to the preset, so this assertion passed on UNPATCHED upstream and
+    // patch-exit-check.sh reported a false "safe to drop". Keep these values distinct
+    // so the test can only pass when the preset is genuinely honored.
+    loadConfigMock.mockReturnValueOnce(buildTestConfig({
+      port: 3100,
+      allowedHostnames: ["leverage.local"],
+    }));
+    process.env.PAPERCLIP_RUNTIME_API_URL = "http://127.0.0.1:3199";
+
+    await startServer();
+
+    expect(process.env.PAPERCLIP_RUNTIME_API_URL).toBe("http://127.0.0.1:3199");
   });
 });
